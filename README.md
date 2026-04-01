@@ -37,8 +37,8 @@ cd vps-poo-2026
 ```
 
 ## Accesos
-- App: https://localhost (acepta el certificado autofirmado)
-- phpMyAdmin: https://localhost/poo_phpmyadmin/
+- App: https://TU_IP_O_DOMINIO (acepta el certificado autofirmado)
+- phpMyAdmin: https://TU_IP_O_DOMINIO/poo_phpmyadmin/
 
 ## Credenciales listas para usar
 - App (login): usuario `cponce`, clave `ponceclave`
