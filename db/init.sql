@@ -11,3 +11,16 @@ CREATE TABLE IF NOT EXISTS usuarios (
 
 INSERT INTO usuarios (username, password, nombre, apellido, email)
 VALUES ('cponce', '$2b$12$6uZ/ZXGHGnrjUiEFg0d35./CCYRRKWmOd3p31mdtFfwXzTIpPualG', 'Carlos', 'Ponce', 'cponce@example.com');
+
+CREATE TABLE cards (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255),
+    column_id INT,
+    position INT DEFAULT 0
+);
+
+CREATE TABLE columns (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL
+);
+INSERT INTO columns (name) VALUES ('TODO'), ('DOING'), ('DONE');
