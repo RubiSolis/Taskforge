@@ -8,6 +8,7 @@ from fastapi.security import HTTPBearer
 from jose import JWTError, jwt
 import bcrypt
 import mysql.connector
+
 app = FastAPI(title="VPS-POO API", root_path="/api")
 JWT_SECRET = os.getenv("JWT_SECRET", "dev_secret_change_me")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
@@ -32,8 +33,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_db():
+    return mysql.connector.connect(**DB_CONFIG)
+
+def get_user_by_email(email: str):
+    conn = get_db()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id, nombre, apellido, password, email, activo FROM usuarios WHERE email = %s LIMIT 1",
+            (email,),
+        )
+        return cursor.fetchone()
+    finally:
+        conn.close()
+
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except ValueError:
+        return False
+
+def create_access_token(payload: dict):
+    now = datetime.now(tz=timezone.utc)
+    exp = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    to_encode = payload.copy()
+    to_encode.update({"exp": exp})
+    return jwt.encode(to_encode, JWT_SECRET, algorithm="HS256")
+
+def decode_token(token: str):
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except JWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalido",
+        ) from exc
+    
+class RegisterRequest(BaseModel):
+    nombre: str
+    apellido: str
+    email: str
+    password: str
+
 class LoginRequest(BaseModel):
-    username: str
+    email: str
     password: str
 
 
@@ -46,47 +95,6 @@ class MoveCard(BaseModel):
     column_id: int
     position: int | None = None
 
-def get_db():
-    return mysql.connector.connect(**DB_CONFIG)
-
-
-def get_user_by_username(username: str):
-    conn = get_db()
-    try:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
-            "SELECT id, username, nombre, apellido, password, email, activo FROM usuarios WHERE username = %s LIMIT 1",
-            (username,),
-        )
-        return cursor.fetchone()
-    finally:
-        conn.close()
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
-    except ValueError:
-        return False
-
-
-def create_access_token(payload: dict):
-    now = datetime.now(tz=timezone.utc)
-    exp = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
-    to_encode = payload.copy()
-    to_encode.update({"exp": exp})
-    return jwt.encode(to_encode, JWT_SECRET, algorithm="HS256")
-
-
-def decode_token(token: str):
-    try:
-        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    except JWTError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token invalido",
-        ) from exc
-
 @app.get("/health")
 def health():
     return {
@@ -96,42 +104,40 @@ def health():
         "disk": psutil.disk_usage('/').percent
     }
 
-# --------- AUTH ---------
+@app.post("/auth/register")
+def register(payload: RegisterRequest):
+   
+    if get_user_by_email(payload.email):
+        raise HTTPException(status_code=400, detail="Email ya está registrado")
 
-def get_user_by_username(username: str):
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT * FROM usuarios WHERE username = %s LIMIT 1",
-        (username,),
-    )
-    user = cursor.fetchone()
-    conn.close()
-    return user
-
-def verify_password(plain, hashed):
     try:
-        return bcrypt.checkpw(plain.encode(), hashed.encode())
-    except:
-        return False
+        cursor = conn.cursor(dictionary=True)
+    
+        hashed = hash_password(payload.password)
 
-def create_token(data: dict):
-    exp = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
-    data.update({"exp": exp})
-    return jwt.encode(data, JWT_SECRET, algorithm="HS256")
+        cursor.execute("""
+            INSERT INTO usuarios (nombre, apellido, email, password, activo)
+            VALUES (%s, %s, %s, %s, 1)
+        """, (payload.nombre, payload.apellido, payload.email,hashed))
+        
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"message": "Usuario creado exitosamente"}
 
 @app.post("/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest):
-    user = get_user_by_username(payload.username)
+    user = get_user_by_email(payload.email)
     if not user or not verify_password(payload.password, user["password"]) or not user["activo"]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
 
     token_payload = {
-        "sub": user["username"],
+        "email": user["email"],
         "user_id": user["id"],
         "nombre": user["nombre"],
         "apellido": user["apellido"],
-        "email": user["email"],
     }
     access_token = create_access_token(token_payload)
 
@@ -139,14 +145,12 @@ def login(payload: LoginRequest):
         "access_token": access_token,
         "token_type": "bearer",
         "user": {
-        "id": user["id"],
-        "username": user["username"],
-        "nombre": user["nombre"],
-        "apellido": user["apellido"],
-        "email": user["email"],
+            "id": user["id"],
+            "nombre": user["nombre"],
+            "apellido": user["apellido"],
+            "email": user["email"],
         },
     }
-
 
 @app.get("/auth/me")
 def me(request: Request):
@@ -166,7 +170,6 @@ def me(request: Request):
 
     payload = decode_token(token)
     return {
-        "username": payload.get("sub"),
         "nombre": payload.get("nombre"),
         "apellido": payload.get("apellido"),
         "email": payload.get("email"),
