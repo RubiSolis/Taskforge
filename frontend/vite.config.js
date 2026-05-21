@@ -9,6 +9,10 @@ export default defineConfig({
   },
   preview: {
     host: true,
-    port: 4173
-  }
+    port: 4173,
+    allowedHosts: [
+      "taskforge.com.ar",
+      "localhost"
+    ]  
+ }
 });

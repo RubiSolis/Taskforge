@@ -1,26 +1,38 @@
-CREATE TABLE IF NOT EXISTS usuarios (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  username VARCHAR(50) NOT NULL UNIQUE,
-  password VARCHAR(255) NOT NULL,
-  nombre VARCHAR(100) NOT NULL,
-  apellido VARCHAR(100) NOT NULL,
-  email VARCHAR(120) NOT NULL,
-  activo TINYINT(1) NOT NULL DEFAULT 1,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+USE `vps-poo`;
 
-INSERT INTO usuarios (username, password, nombre, apellido, email)
-VALUES ('cponce', '$2b$12$6uZ/ZXGHGnrjUiEFg0d35./CCYRRKWmOd3p31mdtFfwXzTIpPualG', 'Carlos', 'Ponce', 'cponce@example.com');
+DROP TABLE IF EXISTS card_order;
+DROP TABLE IF EXISTS cards;
+DROP TABLE IF EXISTS columns;
 
-CREATE TABLE cards (
+DROP TABLE IF EXISTS usuarios;
+CREATE TABLE usuarios (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    title VARCHAR(255),
-    column_id INT,
-    position INT DEFAULT 0
+    nombre VARCHAR(100) NOT NULL,
+    apellido VARCHAR(100) NOT NULL,
+    email VARCHAR(120) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    activo TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE columns (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(50) NOT NULL
 );
+
 INSERT INTO columns (name) VALUES ('TODO'), ('DOING'), ('DONE');
+
+CREATE TABLE cards (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE card_order (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    card_id INT NOT NULL,
+    column_id INT NOT NULL,
+    position INT NOT NULL,
+    FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE,
+    FOREIGN KEY (column_id) REFERENCES columns(id) ON DELETE CASCADE
+);
