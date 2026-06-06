@@ -29,6 +29,7 @@ services:
       PMA_HOST: db
       PMA_USER: ${MYSQL_USER}
       PMA_PASSWORD: ${MYSQL_PASSWORD}
+      PMA_ABSOLUTE_URI: https://taskforge.com.ar/phpmyadmin/
 
   backend:
     build: ./backend
