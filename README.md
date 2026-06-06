@@ -1,4 +1,4 @@
-# VPS-POO (para estudiantes de POO)
+# VPS-POO 
 
 Sistema minimo autocontenido con FastAPI, React, MySQL, phpMyAdmin y Nginx.
 
