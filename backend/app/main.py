@@ -9,6 +9,8 @@ from jose import JWTError, jwt
 import bcrypt
 import mysql.connector
 import secrets
+from openai import OpenAI
+import json
 app = FastAPI(title="VPS-POO API", root_path="/api")
 JWT_SECRET = os.getenv("JWT_SECRET", "dev_secret_change_me")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
@@ -41,7 +43,7 @@ class RegisterRequest(BaseModel):
     password: str
 
 class LoginRequest(BaseModel):
-    username: str
+    email: str
     password: str
 
 
@@ -61,6 +63,38 @@ class ProyectoCrearRequest(BaseModel):
     categoria_id: int
     prioridad_id: int
     cantidad_participantes: int
+
+class UnirseProyectoRequest(BaseModel):
+    codigo_invitacion: str
+
+class ActualizarTareaRequest(BaseModel):
+    titulo: str
+    descripcion: str
+    usuario_asignado_id: int | None = None
+
+class TareaFinalRequest(BaseModel):
+    nombre: str
+    descripcion: str
+    dias_estimados: int
+    rol_sugerido: str
+    usuario_asignado_id: int | None
+
+class ConfirmarProyectoRequest(BaseModel):
+    titulo: str
+    descripcion: str
+    duracion_dias: int
+    categoria_id: int
+    prioridad_id: int
+    cantidad_participantes: int
+    tareas: list[TareaFinalRequest]
+
+class ActualizarProyectoCompletoRequest(BaseModel):
+    titulo: str
+    descripcion: str
+    duracion_dias: int
+    categoria_id: int
+    prioridad_id: int
+    tareas: list[TareaFinalRequest]
 
 def get_db():
     return mysql.connector.connect(**DB_CONFIG)
@@ -136,7 +170,7 @@ def register(payload: RegisterRequest):
 
 @app.post("/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest):
-    user = get_user_by_email(payload.username)
+    user = get_user_by_email(payload.email)
     if not user or not verify_password(payload.password, user["password"]) or not user["activo"]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
 
@@ -180,7 +214,6 @@ def me(request: Request, token_data: str = Depends(security)):
 
     payload = decode_token(token)
     return {
-        "username": payload.get("sub"),
         "nombre": payload.get("nombre"),
         "apellido": payload.get("apellido"),
         "email": payload.get("email"),
@@ -210,8 +243,8 @@ def obtener_prioridades():
     finally:
         conn.close()
 
-@app.post("/proyectos")
-def crear_proyecto_manual(payload: ProyectoCrearRequest, request: Request, token_data: str = Depends(security)):
+@app.get("/proyectos")
+def listar_mis_proyectos(request: Request, token_data: str = Depends(security)):
     auth_header = request.headers.get("authorization", "")
     token_header = request.headers.get("x-access-token", "")
 
@@ -226,20 +259,131 @@ def crear_proyecto_manual(payload: ProyectoCrearRequest, request: Request, token
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token faltante")
 
-    # Decodificar usando tu función existente
+    payload = decode_token(token)
+    user_email = payload.get("email")
+    
+    conn = get_db() 
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM usuarios WHERE email = %s", (user_email,))
+        usuario = cursor.fetchone()
+        
+        if not usuario:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+            
+        usuario_id = usuario["id"]
+
+        query = """
+            SELECT p.id, p.titulo, p.descripcion, p.codigo_invitacion, 
+                   p.fecha_creacion, p.categoria_id, p.prioridad_id, 
+                   p.duracion_dias, pu.rol
+            FROM proyectos p
+            INNER JOIN proyecto_usuarios pu ON p.id = pu.proyecto_id
+            WHERE pu.usuario_id = %s
+            ORDER BY p.fecha_creacion DESC
+        """
+        cursor.execute(query, (usuario_id,))
+        mis_proyectos = cursor.fetchall()
+
+        return mis_proyectos
+
+    except Exception as e:
+        print(f"Error al listar proyectos: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.post("/ia/analizar-proyecto")
+async def analizar_proyecto_ia(proyecto: ProyectoCrearRequest, request: Request, token_data: str = Depends(security)):
+
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.split(" ", 1)[1].strip() if auth_header.lower().startswith("bearer ") else ""
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Token faltante")
+    
+    decode_token(token) 
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Falta la configuración de OPENAI_API_KEY en el servidor.")
+        
+    try:
+        client = OpenAI(api_key=api_key)
+        
+        prompt = f"""
+        Sos un experto en gestión de proyectos informáticos. Desglosá el siguiente proyecto en tareas lógicas y alcanzables.
+
+        Proyecto: {proyecto.titulo}
+        Descripción: {proyecto.descripcion}
+        Duración estimada del proyecto total: {proyecto.duracion_dias} días
+        Cantidad de integrantes en el equipo: {proyecto.cantidad_participantes}
+
+        Respondé SOLO con JSON válido (un array de objetos), sin formateo markdown ni bloques de código.
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Solo devolvé JSON válido (un array de objetos). Cada objeto representa una tarea y debe contener obligatoriamente las llaves string exactas en minúscula: 'nombre', 'descripcion', 'dias_estimados' y 'rol_sugerido'."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+        
+        respuesta_cruda = response.choices[0].message.content.strip()
+        
+        if respuesta_cruda.startswith("```"):
+            lineas = respuesta_cruda.splitlines()
+            if lineas[0].startswith("```"):
+                lineas.pop(0)
+            if lineas and lineas[-1].startswith("```"):
+                lineas.pop()
+            respuesta_cruda = "\n".join(lineas).strip()
+
+        lista_tareas = json.loads(respuesta_cruda)
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="La IA no mandó un JSON limpio.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al conectar con OpenAI: {str(e)}")
+
+    return {
+        "status": "preview",
+        "titulo_proyecto": proyecto.titulo,
+        "descripcion_proyecto": proyecto.descripcion,
+        "duracion_dias": proyecto.duracion_dias,
+        "categoria_id": proyecto.categoria_id,
+        "prioridad_id": proyecto.prioridad_id,
+        "tareas_sugeridas": lista_tareas
+    }
+
+@app.post("/proyectos/confirmar")
+async def confirmar_y_guardar_proyecto(payload: ConfirmarProyectoRequest, request: Request, token_data: str = Depends(security)):
+
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.split(" ", 1)[1].strip() if auth_header.lower().startswith("bearer ") else ""
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token faltante")
+
     user_payload = decode_token(token)
-    creador_id = user_payload.get("user_id") # Sacamos el ID que metiste en el login
+    creador_id = user_payload.get("user_id")        
 
     if not creador_id:
         raise HTTPException(status_code=401, detail="Usuario no identificado en el token")
 
-    # --- GUARDAR EN BASE DE DATOS ---
-    codigo_invitacion = secrets.token_hex(3).upper() # Código random tipo F3A82C
+    codigo_invitacion = secrets.token_hex(3).upper()
     conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
 
-        # Insertar proyecto
         cursor.execute("""
             INSERT INTO proyectos (titulo, descripcion, duracion_dias, codigo_invitacion, categoria_id, prioridad_id, creador_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -252,19 +396,29 @@ def crear_proyecto_manual(payload: ProyectoCrearRequest, request: Request, token
             payload.prioridad_id,
             creador_id
         ))
-        
         proyecto_id = cursor.lastrowid
 
-        # Vincular automáticamente al dueño como admin
         cursor.execute("""
             INSERT INTO proyecto_usuarios (proyecto_id, usuario_id, rol)
             VALUES (%s, %s, 'admin')
         """, (proyecto_id, creador_id))
 
+        for tarea in payload.tareas:
+            cursor.execute("""
+                INSERT INTO tareas (proyecto_id, titulo, descripcion, dias_estimados, rol_sugerido, asignado_usuario_id, estado)
+                VALUES (%s, %s, %s, %s, %s, NULL, 'pendiente')
+            """, (
+                proyecto_id,
+                tarea.nombre,
+                tarea.descripcion,
+                tarea.dias_estimados,
+                tarea.rol_sugerido
+            ))
+
         conn.commit()
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error en la base de datos: {err.msg}")
+        raise HTTPException(status_code=500, detail=f"Error de base de datos al guardar: {err.msg}")
     finally:
         conn.close()
 
@@ -272,142 +426,201 @@ def crear_proyecto_manual(payload: ProyectoCrearRequest, request: Request, token
         "status": "success",
         "proyecto_id": proyecto_id,
         "codigo_invitacion": codigo_invitacion,
-        "mensaje": "Proyecto guardado exitosamente."
+        "mensaje": "Proyecto y tareas editadas guardados correctamente."
     }
 
-@app.get("/columns")
-def get_columns():
+@app.get("/proyectos/{proyecto_id}/tareas")
+def obtener_tareas_e_integrantes(proyecto_id: int, request: Request, token_data: str = Depends(security)):
+    auth_header = request.headers.get("authorization", "")
+    token_header = request.headers.get("x-access-token", "")
+
+    token = ""
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    elif token_header.lower().startswith("bearer "):
+        token = token_header.split(" ", 1)[1].strip()
+    else:
+        token = token_header.strip()
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token faltante")
+
+    decode_token(token)
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT * FROM columns ORDER BY id")
-    data = cursor.fetchall()
+    try:
+        query_tareas = """
+            SELECT id, titulo, descripcion, dias_estimados, rol_sugerido, estado, asignado_usuario_id 
+            FROM tareas 
+            WHERE proyecto_id = %s
+        """
+        cursor.execute(query_tareas, (proyecto_id,))
+        tareas = cursor.fetchall()
 
-    conn.close()
-    return data
+        query_integrantes = """
+            SELECT u.id, u.nombre, u.apellido, u.email, pu.rol
+            FROM usuarios u
+            INNER JOIN proyecto_usuarios pu ON u.id = pu.usuario_id
+            WHERE pu.proyecto_id = %s
+        """
+        cursor.execute(query_integrantes, (proyecto_id,))
+        integrantes = cursor.fetchall()
 
-@app.get("/cards")
-def get_cards():
+        return {
+            "proyecto_id": proyecto_id,
+            "tareas": tareas,
+            "integrantes": integrantes
+        }
+    except Exception as e:
+        print(f"Error al recuperar info del proyecto {proyecto_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor al consultar la base de datos")
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.post("/proyectos/unirse")
+def unirse_a_proyecto(payload: UnirseProyectoRequest, request: Request, token_data: str = Depends(security)):
+    # 🔑 VALIDACIÓN DE TOKEN
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.split(" ", 1)[1].strip() if auth_header.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Token faltante")
+
+    user_payload = decode_token(token)
+    usuario_id = user_payload.get("user_id")
+
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
+    try:
+        # 1. Buscar si el proyecto existe con ese código
+        cursor.execute("SELECT id FROM proyectos WHERE codigo_invitacion = %s LIMIT 1", (payload.codigo_invitacion,))
+        proyecto = cursor.fetchone()
+        if not proyecto:
+            raise HTTPException(status_code=404, detail="Código de invitación inválido o no existe.")
+        
+        proyecto_id = proyecto["id"]
 
-    cursor.execute("""
-        SELECT
-            c.id,
-            c.title,
-            co.column_id,
-            co.position
-        FROM cards c
-        JOIN card_order co ON c.id = co.card_id
-        ORDER BY co.column_id, co.position
-    """)
-
-    data = cursor.fetchall()
-    conn.close()
-    return data
-
-@app.post("/cards")
-def create_card(card: dict):
-    conn = get_db()
-    cursor = conn.cursor()
-
-    column_id = card.get("column_id", 1)
-
-    # 🔹 calcular posición en card_order
-    cursor.execute("""
-        SELECT COALESCE(MAX(position), 0) + 1
-        FROM card_order
-        WHERE column_id = %s
-    """, (column_id,))
-    pos = cursor.fetchone()[0]
-
-    # 🔹 crear card (SOLO title)
-    cursor.execute("""
-        INSERT INTO cards (title)
-        VALUES (%s)
-    """, (card["title"],))
-
-    card_id = cursor.lastrowid  # 🔥 clave
-
-    # 🔹 insertar en card_order
-    cursor.execute("""
-        INSERT INTO card_order (card_id, column_id, position)
-        VALUES (%s, %s, %s)
-    """, (card_id, column_id, pos))
-
-    conn.commit()
-    conn.close()
-
-    return {"ok": True}
-
-@app.patch("/cards/{card_id}/move")
-def move_card(card_id: int, data: MoveCard):
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    # nueva posición
-    cursor.execute("""
-        SELECT COALESCE(MAX(position),0)+1
-        FROM card_order
-        WHERE column_id = %s
-    """, (data.column_id,))
-
-    pos = cursor.fetchone()[0]
-
-    # mover tarjeta
-    cursor.execute("""
-        UPDATE card_order
-        SET column_id = %s,
-            position = %s
-        WHERE card_id = %s
-    """, (data.column_id, pos, card_id))
-
-    conn.commit()
-    conn.close()
-
-    return {"ok": True}
-
-
-@app.post("/cards/reorder")
-def reorder(data: dict):
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    for i, card_id in enumerate(data["cards"]):
         cursor.execute("""
-            UPDATE card_order
-            SET position = %s
-            WHERE card_id = %s
-              AND column_id = %s
-        """, (i + 1, card_id, data["column_id"]))
+            SELECT id FROM proyecto_usuarios 
+            WHERE proyecto_id = %s AND usuario_id = %s LIMIT 1
+        """, (proyecto_id, usuario_id))
+        
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Ya formas parte de este proyecto.")
 
-    conn.commit()
-    conn.close()
+        cursor.execute("""
+            INSERT INTO proyecto_usuarios (proyecto_id, usuario_id, rol)
+            VALUES (%s, %s, 'miembro')
+        """, (proyecto_id, usuario_id))
+        conn.commit()
 
-    return {"ok": True}
+        return {"status": "success", "message": "Te uniste al proyecto correctamente."}
 
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"Error en la base de datos: {err.msg}")
+    finally:
+        cursor.close()
+        conn.close()
 
-@app.delete("/cards/{card_id}")
-def delete_card(card_id: int):
+@app.put("/tareas/{tarea_id}")
+def actualizar_tarea(tarea_id: int, payload: ActualizarTareaRequest, request: Request, token_data: str = Depends(security)):
+
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.split(" ", 1)[1].strip() if auth_header.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Token faltante")
+
+    user_payload = decode_token(token)
+    usuario_id = user_payload.get("user_id")
 
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
+    try:
+    
+        cursor.execute("SELECT proyecto_id FROM tareas WHERE id = %s LIMIT 1", (tarea_id,))
+        tarea = cursor.fetchone()
+        if not tarea:
+            raise HTTPException(status_code=404, detail="La tarea no existe.")
+        
+        proyecto_id = tarea["proyecto_id"]
 
-    # borrar orden primero
-    cursor.execute("""
-        DELETE FROM card_order
-        WHERE card_id = %s
-    """, (card_id,))
+      
+        cursor.execute("""
+            SELECT rol FROM proyecto_usuarios 
+            WHERE proyecto_id = %s AND usuario_id = %s LIMIT 1
+        """, (proyecto_id, usuario_id))
+        rol_usuario = cursor.fetchone()
 
-    # borrar card
-    cursor.execute("""
-        DELETE FROM cards
-        WHERE id = %s
-    """, (card_id,))
+        if not rol_usuario or rol_usuario["rol"] != "admin":
+            raise HTTPException(status_code=403, detail="Permiso denegado. Solo el administrador puede modificar tareas.")
 
-    conn.commit()
-    conn.close()
 
-    return {"ok": True}
+        cursor.execute("""
+            UPDATE tareas 
+            SET titulo = %s, descripcion = %s, asignado_usuario_id = %s
+            WHERE id = %s
+        """, (payload.titulo, payload.descripcion, payload.usuario_asignado_id, tarea_id))
+        conn.commit()
+
+        return {"status": "success", "message": "Tarea actualizada de forma exitosa."}
+
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"Error de base de datos al actualizar: {err.msg}")
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.put("/proyectos/{proyecto_id}/actualizar")
+def actualizar_proyecto_y_tareas(proyecto_id: int, payload: ActualizarProyectoCompletoRequest, request: Request, token_data: str = Depends(security)):
+
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.split(" ", 1)[1].strip() if auth_header.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Token faltante")
+
+    user_payload = decode_token(token)
+    usuario_id = user_payload.get("user_id")
+
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+    
+        cursor.execute("""
+            SELECT rol FROM proyecto_usuarios 
+            WHERE proyecto_id = %s AND usuario_id = %s LIMIT 1
+        """, (proyecto_id, usuario_id))
+        rol_usuario = cursor.fetchone()
+
+        if not rol_usuario or rol_usuario["rol"] != "admin":
+            raise HTTPException(status_code=403, detail="Permiso denegado. Solo el administrador puede modificar el proyecto.")
+
+        cursor.execute("""
+            UPDATE proyectos 
+            SET titulo = %s, descripcion = %s, duracion_dias = %s, categoria_id = %s, prioridad_id = %s
+            WHERE id = %s
+        """, (payload.titulo, payload.descripcion, payload.duracion_dias, payload.categoria_id, payload.prioridad_id, proyecto_id))
+
+        cursor.execute("DELETE FROM tareas WHERE proyecto_id = %s", (proyecto_id,))
+
+        for tarea in payload.tareas:
+            cursor.execute("""
+                INSERT INTO tareas (proyecto_id, titulo, descripcion, dias_estimados, rol_sugerido, asignado_usuario_id, estado)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pendiente') 
+            """, (
+                proyecto_id,
+                tarea.nombre,
+                tarea.descripcion,
+                tarea.dias_estimados,
+                tarea.rol_sugerido,
+                tarea.usuario_asignado_id  
+            ))
+
+        conn.commit()
+        return {"status": "success", "message": "Proyecto y tareas actualizados correctamente de forma masiva."}
+
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err.msg}")
+    finally:
+        cursor.close()
+        conn.close()
